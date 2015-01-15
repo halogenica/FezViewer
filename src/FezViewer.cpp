@@ -256,8 +256,19 @@ void FezViewer::loadArtObject()
     m_dimensions = Vec3f(aoXml.getChild("ArtObject/Size/Vector3")["x"].getValue<float>(),
                          aoXml.getChild("ArtObject/Size/Vector3")["y"].getValue<float>(),
                          aoXml.getChild("ArtObject/Size/Vector3")["z"].getValue<float>());
-    
-    string aoPngName = aoXml.getChild("ArtObject")["cubemapPath"].getValue();
+
+    string aoPngName;
+    if (aoXml.getChild("ArtObject").hasAttribute("cubemapPath"))
+    {
+        // The XBOX content contains a "cubemapPath" attribute with the .png name
+        aoPngName = aoXml.getChild("ArtObject")["cubemapPath"].getValue();
+    }
+    else
+    {
+        // The PC content infers the .png name from the "name" attribute
+        aoPngName = aoXml.getChild("ArtObject")["name"].getValue();
+    }
+
     boost::algorithm::to_lower(aoPngName);
     fs::path artObjectPng = m_file.parent_path().string() + sep + aoPngName + ".png";
     if (exists(artObjectPng))
@@ -487,8 +498,19 @@ void FezViewer::loadLevel()
             console() << "WARNING! Art Object Name Mismatch: " << aoName << ", " << aoName2 << endl;
         }
         
-        string aoPngName = aoXml.getChild("ArtObject")["cubemapPath"].getValue();
-        boost::algorithm::to_lower(aoPngName);
+        string aoPngName;
+        if (aoXml.getChild("ArtObject").hasAttribute("cubemapPath"))
+        {
+            // The XBOX content contains a "cubemapPath" attribute with the .png name
+            aoPngName = aoXml.getChild("ArtObject")["cubemapPath"].getValue();
+            boost::algorithm::to_lower(aoPngName);
+        }
+        else
+        {
+            // The PC content infers the .png name from the "name" attribute
+            aoPngName = aoName2;
+        }
+
         fs::path artObjectPng = artObjectsPath.string() + aoPngName + ".png";
         if (exists(artObjectPng))
         {
