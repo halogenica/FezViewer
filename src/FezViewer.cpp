@@ -1,33 +1,9 @@
-#include "cinder/app/AppBasic.h"
-#include "cinder/Camera.h"
-#include "cinder/MayaCamUI.h"
-#include "cinder/gl/gl.h"
-#include "cinder/gl/Texture.h"
-#include "cinder/TriMesh.h"
-#include "cinder/Xml.h"
-#include "cinder/Filesystem.h"
-#include "cinder/ImageIo.h"
-#include "cinder/Text.h"
-#include "cinder/Timeline.h"
-#include "boost/algorithm/String.hpp"
-#include <list>
-#include <map>
-#include <vector>
-#include "Resources.h"
+#include "Common.h"
+#include "Trile.h"
+#include "ArtObject.h"
+#include "BackgroundPlane.h"
 
-using namespace ci;
-using namespace ci::app;
-using namespace std;
-
-const Vec3f gc_normals[] = { Vec3f(-1., 0., 0.), Vec3f( 0., -1., 0.), Vec3f(0., 0., -1.),
-                             Vec3f( 1., 0., 0.), Vec3f( 0.,  1., 0.), Vec3f(0., 0.,  1.) };
-const Quatf gc_orientations[] = { Quatf(0, M_PI, 0), Quatf(0, -M_PI/2, 0), Quatf(0, 0, 0), Quatf(0, M_PI/2, 0) };
-
-struct RenderObject
-{
-    TriMesh     mesh;
-    uint32_t    textureIndex;
-};
+gl::Texture* Trile::s_pTexture;
 
 class FezViewer : public AppBasic
 {
@@ -35,12 +11,10 @@ class FezViewer : public AppBasic
     void prepareSettings(Settings* pSettings);
     void setup();
     void shutdown();
-    void setDisplayString(string str);
+    void setDisplayString(const string& str);
     void spawnLoader(fs::path file);
     void loadArtObject();
     void loadLevel();
-    void loadTrile(XmlTree trile, Vec3f trilePos, uint32_t trileOrient, Vec3f trileEmplacement);
-    void loadAO(XmlTree ao, Vec3f aoPos, Quatf aoRot, Vec3f aoScale, uint32_t texIndex);
     void resize();
     void resetCamera(float zoom);
     void mouseDown(MouseEvent event);
@@ -52,9 +26,6 @@ class FezViewer : public AppBasic
     void draw();
 
     MayaCamUI               m_camera;
-    vector<RenderObject>    m_renderObjects;
-    vector<Surface>         m_surfaces;
-    vector<gl::Texture>     m_textures;
     fs::path                m_file;
     bool                    m_verbose;
     Vec3f                   m_dimensions;
@@ -62,6 +33,16 @@ class FezViewer : public AppBasic
     mutex                   m_mutex;
     bool                    m_exit;
     bool                    m_quit;
+
+    deque<Trile>            m_triles;
+    Surface                 m_trileSurface;
+    gl::Texture             m_trileTexture;
+    bool                    m_trileTexReload;
+
+    deque<ArtObject>        m_artObjects;
+
+    deque<BackgroundPlane>  m_backgroundPlanes;
+    
     TextBox*                m_pText;    // Cinder bug requires this to be a pointer, initialized in setup()
     gl::Texture             m_textTexture;
     Anim<float>             m_textAlpha;
@@ -79,18 +60,24 @@ void FezViewer::prepareSettings(Settings* pSettings)
 void FezViewer::setup()
 {
     m_file = "";
+#ifdef DEBUG
+    m_verbose = true;
+#else 
     m_verbose = false;
+#endif
     m_dimensions = Vec3f::zero();
     m_thread = nullptr;
     m_exit = false;
     m_quit = false;
+    
+    m_trileTexReload = false;
 
     m_pText = new TextBox();
     m_pText->setFont(Font(app::loadResource(RES_MY_FONT), 30));
     m_pText->setColor(ci::Colorf(1.f, 1.f, 1.f));
     m_pText->setAlignment(TextBox::LEFT);
     m_pText->setSize(Vec2f(getWindowWidth(), TextBox::GROW));
-    m_pText->setText("FezViewer v0.1 \nPress 'O' or drag and drop file to open");
+    m_pText->setText("FezViewer v0.2 \nPress 'O' or drag and drop file to open");
     m_textTexture = gl::Texture(m_pText->render());
     m_textAlpha = 1.f;
     m_textReload = false;
@@ -119,6 +106,8 @@ void FezViewer::setup()
     
     gl::enableDepthRead();
     gl::enableDepthWrite();
+    gl::enableAlphaBlending();
+    gl::enable(GL_CULL_FACE);
     
     resetCamera(25.f);
     
@@ -155,15 +144,7 @@ void FezViewer::setup()
     Surface surf = Surface(1, 1, false);
     surf.setPixel(Vec2i::zero(), ColorAf(0.7f, 0.7f, 0.7f));
     
-    gl::Texture texture = gl::Texture(surf);
-    texture.setMinFilter(GL_NEAREST);
-    texture.setMagFilter(GL_NEAREST);
-    m_textures.push_back(texture);
-    
-    RenderObject ro;
-    ro.mesh = mesh;
-    ro.textureIndex = 0;
-    m_renderObjects.push_back(ro);
+    m_artObjects.push_back(ArtObject(mesh, surf));
 }
 
 void FezViewer::shutdown()
@@ -177,7 +158,7 @@ void FezViewer::shutdown()
     delete m_pText;
 }
 
-void FezViewer::setDisplayString(string str)
+void FezViewer::setDisplayString(const string& str)
 {
     
     lock_guard<mutex> lock( m_mutex );
@@ -199,9 +180,15 @@ void FezViewer::spawnLoader(const fs::path file)
         m_thread->join();
         m_thread = nullptr;
     }
-    m_renderObjects.clear();
-    m_surfaces.clear();
-    m_textures.clear();
+    
+    m_triles.clear();
+    m_trileTexReload = false;
+    Trile::s_pTexture = nullptr;
+    
+    m_artObjects.clear();
+    
+    m_backgroundPlanes.clear();
+
     m_file = file;
     m_exit = 0;
     
@@ -252,10 +239,11 @@ void FezViewer::loadArtObject()
         setDisplayString(displayString.str());
         return;
     }
-    XmlTree aoXml = XmlTree(loadFile(artObjectXml));
-    m_dimensions = Vec3f(aoXml.getChild("ArtObject/Size/Vector3")["x"].getValue<float>(),
-                         aoXml.getChild("ArtObject/Size/Vector3")["y"].getValue<float>(),
-                         aoXml.getChild("ArtObject/Size/Vector3")["z"].getValue<float>());
+    const XmlTree aoXml = XmlTree(loadFile(artObjectXml));
+    const XmlTree& lookAtXml = aoXml.getChild("ArtObject/Size/Vector3");
+    m_dimensions = Vec3f(lookAtXml.getAttributeValue<float>("x"),
+                         lookAtXml.getAttributeValue<float>("y"),
+                         lookAtXml.getAttributeValue<float>("z"));
 
     string aoPngName;
     if (aoXml.getChild("ArtObject").hasAttribute("cubemapPath"))
@@ -285,19 +273,14 @@ void FezViewer::loadArtObject()
         return;
     }
     
-    {
-        lock_guard<mutex> lock( m_mutex );
-        if (m_exit) { return; }
-        m_surfaces.push_back(loadImage(artObjectPng));
-    }
-    
-    Vec3f pos = Vec3f(0.5, 0.5, 0.5) + m_dimensions/2;  // counteract offset from level loader
+    Vec3f pos = Vec3f::zero(); // counteract offset from level loader
     Quatf rot = Quatf(0,0,0);
     Vec3f scale = Vec3f(1.f, 1.f, 1.f);
+    Vec3f offset = -m_dimensions/2;
     {
         lock_guard<mutex> lock( m_mutex );
         if (m_exit) { return; }
-        loadAO(aoXml, pos, rot, scale, 0);
+        m_artObjects.push_back(ArtObject(aoXml, pos, rot, scale, offset, artObjectPng));
     }
     
     ostringstream displayString;
@@ -308,6 +291,7 @@ void FezViewer::loadArtObject()
 void FezViewer::loadLevel()
 {
     ci::ThreadSetup threadSetup; // Required for cinder multithreading
+    double startTime = getElapsedSeconds();
     
     // TODO: path.preferred_separator doesn't work on windows
     const auto sep = '/';
@@ -315,11 +299,11 @@ void FezViewer::loadLevel()
     // Load the level data
     console() << "Loading Level: " << m_file.string() << endl;
     XmlTree level = XmlTree(loadFile(m_file));
-    XmlTree lookAtXml = level.getChild("Level/Size/Vector3");
-    m_dimensions = Vec3f(lookAtXml["x"].getValue<float>(),
-                         lookAtXml["y"].getValue<float>(),
-                         lookAtXml["z"].getValue<float>());
-    
+    const XmlTree& lookAtXml = level.getChild("Level/Size/Vector3");
+    m_dimensions = Vec3f(lookAtXml.getAttributeValue<float>("x"),
+                         lookAtXml.getAttributeValue<float>("y"),
+                         lookAtXml.getAttributeValue<float>("z"));
+
     // Load trile sets
     string trileSetName = level.getChild("Level")["trileSetName"].getValue();
     if (m_verbose)
@@ -344,13 +328,10 @@ void FezViewer::loadLevel()
         setDisplayString(displayString.str());
         return;
     }
-    
-    {
-        lock_guard<mutex> lock( m_mutex );
-        if (m_exit) { return; }
-        m_surfaces.push_back(loadImage(trileSetPng));
-    }
-    
+
+    m_trileSurface = loadImage(trileSetPng);
+    m_trileTexReload = true;
+
     if (exists(trileSetXml))
     {
         ostringstream displayString;
@@ -364,7 +345,7 @@ void FezViewer::loadLevel()
         setDisplayString(displayString.str());
         return;
     }
-    XmlTree trileSet = XmlTree(loadFile(trileSetXml));
+    const XmlTree trileSet = XmlTree(loadFile(trileSetXml));
     string trileSetName2 = trileSet.getChild("TrileSet")["name"].getValue();
     boost::algorithm::to_lower(trileSetName2);
     if (trileSetName != trileSetName2)
@@ -390,11 +371,11 @@ void FezViewer::loadLevel()
     }
     
     // Load all level triles
-    XmlTree levelTriles = level.getChild("Level/Triles");
+    const XmlTree& levelTriles = level.getChild("Level/Triles");
     int numLevelTriles = 0;
     for (const auto& trile : levelTriles)
     {
-        XmlTree emplacementXml = trile.getChild("TrileEmplacement");
+        const XmlTree& emplacementXml = trile.getChild("TrileEmplacement");
         Vec3f emplacement = Vec3f(emplacementXml["x"].getValue<float>(),
                                   emplacementXml["y"].getValue<float>(),
                                   emplacementXml["z"].getValue<float>());
@@ -408,7 +389,7 @@ void FezViewer::loadLevel()
 
             if (trileMap.find(tid) != trileMap.end())
             {
-                XmlTree posXml = trile.getChild("TrileInstance/Position/Vector3");
+                const XmlTree& posXml = trile.getChild("TrileInstance/Position/Vector3");
                 Vec3f pos = Vec3f(posXml["x"].getValue<float>(),
                                   posXml["y"].getValue<float>(),
                                   posXml["z"].getValue<float>());
@@ -417,7 +398,7 @@ void FezViewer::loadLevel()
                 {
                     lock_guard<mutex> lock( m_mutex );
                     if (m_exit) { return; }
-                    loadTrile(trileMap[tid], pos, orient, emplacement);
+                    m_triles.push_back(Trile(trileMap[tid], pos, orient, emplacement, -m_dimensions/2));
                 }
             }
             else
@@ -439,7 +420,7 @@ void FezViewer::loadLevel()
             
             if (trileMap.find(tid) != trileMap.end())
             {
-                XmlTree posXml = trile.getChild("TrileInstance/OverlappedTriles/TrileInstance/Position/Vector3");
+                const XmlTree& posXml = trile.getChild("TrileInstance/OverlappedTriles/TrileInstance/Position/Vector3");
                 Vec3f pos = Vec3f(posXml["x"].getValue<float>(),
                                   posXml["y"].getValue<float>(),
                                   posXml["z"].getValue<float>());
@@ -448,7 +429,7 @@ void FezViewer::loadLevel()
                 {
                     lock_guard<mutex> lock( m_mutex );
                     if (m_exit) { return; }
-                    loadTrile(trileMap[tid], pos, orient, emplacement);
+                    m_triles.push_back(Trile(trileMap[tid], pos, orient, emplacement, -m_dimensions/2));
                 }
             }
             else
@@ -460,10 +441,10 @@ void FezViewer::loadLevel()
         }
     }
     console() << "Loaded " << numLevelTriles << " Level Triles" << endl;
-    
+
     // Load art objects
     fs::path artObjectsPath = m_file.parent_path().string() + sep + ".." + sep + "art objects" + sep;
-    XmlTree levelArtObjects = level.getChild("Level/ArtObjects");
+    const XmlTree& levelArtObjects = level.getChild("Level/ArtObjects");
     int numLevelArtObjects = 0;
     for (const auto& object : levelArtObjects)
     {
@@ -490,7 +471,7 @@ void FezViewer::loadLevel()
             setDisplayString(displayString.str());
             return;
         }
-        XmlTree aoXml = XmlTree(loadFile(artObjectXml));
+        const XmlTree aoXml = XmlTree(loadFile(artObjectXml));
         string aoName2 = aoXml.getChild("ArtObject")["name"].getValue();
         boost::algorithm::to_lower(aoName2);
         if (aoName != aoName2)
@@ -526,128 +507,132 @@ void FezViewer::loadLevel()
             return;
         }
         
-        {
-            lock_guard<mutex> lock( m_mutex );
-            if (m_exit) { return; }
-            m_surfaces.push_back(loadImage(artObjectPng));
-        }
-        
-        XmlTree posXml = object.getChild("ArtObjectInstance/Position/Vector3");
+        const XmlTree& posXml = object.getChild("ArtObjectInstance/Position/Vector3");
         Vec3f pos = Vec3f(posXml["x"].getValue<float>(),
                           posXml["y"].getValue<float>(),
                           posXml["z"].getValue<float>());
-        XmlTree rotXml = object.getChild("ArtObjectInstance/Rotation/Quaternion");
+        const XmlTree& rotXml = object.getChild("ArtObjectInstance/Rotation/Quaternion");
         Quatf rot = Quatf(rotXml["w"].getValue<float>(),
                           rotXml["x"].getValue<float>(),
                           rotXml["y"].getValue<float>(),
                           rotXml["z"].getValue<float>() );
-        XmlTree scaleXml = object.getChild("ArtObjectInstance/Scale/Vector3");
+        const XmlTree& scaleXml = object.getChild("ArtObjectInstance/Scale/Vector3");
         Vec3f scale = Vec3f(scaleXml["x"].getValue<float>(),
                             scaleXml["y"].getValue<float>(),
                             scaleXml["z"].getValue<float>());
+        Vec3f offset = -m_dimensions/2 - Vec3f(0.5, 0.5, 0.5);
         {
             lock_guard<mutex> lock( m_mutex );
             if (m_exit) { return; }
-            loadAO(aoXml, pos, rot, scale, numLevelArtObjects);
+            m_artObjects.push_back(ArtObject(aoXml, pos, rot, scale, offset, artObjectPng));
         }
     }
     console() << "Loaded " << numLevelArtObjects << " Art Objects" << endl;
 
+    // Load background planes
+    fs::path backgroundPlanePath = m_file.parent_path().string() + sep + ".." + sep + "background planes" + sep;
+    const XmlTree& levelBackgroundPlanes = level.getChild("Level/BackgroundPlanes");
+    int numLevelBackgroundPlanes = 0;
+
+    for (const auto& plane : levelBackgroundPlanes)
+    {
+        numLevelBackgroundPlanes++;
+        string bpName = plane.getChild("BackgroundPlane")["textureName"].getValue();
+        std::replace(bpName.begin(), bpName.end(), '\\', '/');    // Mac doesn't like backslash separators
+        boost::algorithm::to_lower(bpName);
+
+        ostringstream displayString;
+        displayString << "Loading Background Plane " << numLevelBackgroundPlanes << ": " << bpName;
+        setDisplayString(displayString.str());
+        
+        fs::path backgroundPlanePng;
+        XmlTree* pAnimXml = nullptr;
+        XmlTree animXml;
+        
+        if (plane.getChild("BackgroundPlane")["animated"].getValue() == "True")
+        {
+            fs::path backgroundPlaneXml = backgroundPlanePath.string() + bpName + ".xml";
+            backgroundPlanePng = backgroundPlanePath.string() + bpName + ".ani.png";
+
+            if (exists(backgroundPlaneXml))
+            {
+                ostringstream displayString;
+                displayString << "Loading Background Plane .xml: " << backgroundPlaneXml.filename();
+                setDisplayString(displayString.str());
+            }
+            else
+            {
+                ostringstream displayString;
+                displayString << "ERROR! Missing Trile Set .xml: " << backgroundPlaneXml;
+                setDisplayString(displayString.str());
+                return;
+            }
+            animXml = XmlTree(loadFile(backgroundPlaneXml));
+            pAnimXml = &animXml;
+        }
+        else
+        {
+            backgroundPlanePng = backgroundPlanePath.string() + bpName + ".png";
+        }
+
+        if (exists(backgroundPlanePng))
+        {
+            ostringstream displayString;
+            displayString << "Loading Background Plane .png: " << backgroundPlanePng.filename();
+            setDisplayString(displayString.str());
+        }
+        else
+        {
+            ostringstream displayString;
+            displayString << "ERROR! Missing Background Plane .png: " << backgroundPlanePng;
+            setDisplayString(displayString.str());
+            return;
+        }
+        
+        const XmlTree& posXml = plane.getChild("BackgroundPlane/Position/Vector3");
+        Vec3f pos = Vec3f(posXml["x"].getValue<float>(),
+                          posXml["y"].getValue<float>(),
+                          posXml["z"].getValue<float>());
+        const XmlTree& rotXml = plane.getChild("BackgroundPlane/Rotation/Quaternion");
+        Quatf rot = Quatf(rotXml["w"].getValue<float>(),
+                          rotXml["x"].getValue<float>(),
+                          rotXml["y"].getValue<float>(),
+                          rotXml["z"].getValue<float>() );
+        const XmlTree scaleXml = plane.getChild("BackgroundPlane/Scale/Vector3");
+        Vec3f scale = Vec3f(scaleXml["x"].getValue<float>(),
+                            scaleXml["y"].getValue<float>(),
+                            scaleXml["z"].getValue<float>());
+        Vec3f offset = Vec3f(-m_dimensions/2);
+        
+        bool doubleSided = plane.getChild("BackgroundPlane")["doubleSided"].getValue() == "True";
+        bool billboard = plane.getChild("BackgroundPlane")["billboard"].getValue() == "True";
+        bool lightmap = plane.getChild("BackgroundPlane")["lightMap"].getValue() == "True";
+        bool pixelatedLightmap = plane.getChild("BackgroundPlane")["pixelatedLightmap"].getValue() == "True";
+        bool clampTexture = plane.getChild("BackgroundPlane")["clampTexture"].getValue() == "True";
+        
+        Vec2d repeat = Vec2d(false, false);
+        if (pAnimXml)
+        {
+            repeat.x = plane.getChild("BackgroundPlane")["xTextureRepeat"].getValue() == "True";
+            repeat.y = plane.getChild("BackgroundPlane")["yTextureRepeat"].getValue() == "True";
+        }
+        {
+            lock_guard<mutex> lock( m_mutex );
+            if (m_exit) { return; }
+            m_backgroundPlanes.push_back(BackgroundPlane(pos, rot, scale, pAnimXml, offset, doubleSided, billboard,
+                                                         lightmap, pixelatedLightmap, clampTexture, repeat,
+                                                         backgroundPlanePng));
+        }
+    }
+    console() << "Loaded " << numLevelBackgroundPlanes << " Background Planes" << endl;
     ostringstream displayString;
     displayString << "Finished Loading " << m_file.filename().string() <<
-                     "  (" << numLevelTriles << " Triles, " << numLevelArtObjects << " Art Objects)";
+                     "  (" << numLevelTriles << " Triles, " << numLevelArtObjects << " Art Objects, " << numLevelBackgroundPlanes << " Background Planes)";
+    if (m_verbose)
+    {
+        displayString << endl << getElapsedSeconds() - startTime << " Seconds";
+    }
     setDisplayString(displayString.str());
-}
-
-void FezViewer::loadTrile(XmlTree trile, Vec3f trilePos, uint32_t trileOrient, Vec3f trileEmplacement)
-{
-    TriMesh mesh;
-    vector<Vec3f> positions;
-    vector<Vec3f> normals;
-    vector<Vec2f> texcoords;
-    vector<uint32_t> indices;
-    XmlTree xmlVertices = trile.getChild("Trile/Geometry/ShaderInstancedIndexedPrimitives/Vertices");
-    
-    for (auto vertex : xmlVertices)
-    {
-        XmlTree posXml = vertex.getChild("Position/Vector3");
-        Vec3f pos = Vec3f(posXml["x"].getValue<float>(),
-                          posXml["y"].getValue<float>(),
-                          posXml["z"].getValue<float>());
-        // TODO: how to use trileEmplacement?
-        pos = pos * gc_orientations[trileOrient];
-        pos += trilePos - (m_dimensions/2);
-        positions.push_back(pos);
-        
-        XmlTree normXml = vertex.getChild("Normal");
-        normals.push_back(gc_normals[normXml.getValue<int>()]);
-        
-        XmlTree coordXml = vertex.getChild("TextureCoord/Vector2");
-        texcoords.push_back(Vec2f(coordXml["x"].getValue<float>(),
-                                  coordXml["y"].getValue<float>()));
-    }
-
-    mesh.appendVertices(&positions[0], positions.size());
-    mesh.appendNormals(&normals[0], normals.size());
-    mesh.appendTexCoords(&texcoords[0], texcoords.size());
-    
-    XmlTree xmlIndices = trile.getChild("Trile/Geometry/ShaderInstancedIndexedPrimitives/Indices");
-    for (auto index : xmlIndices)
-    {
-        indices.push_back(index.getValue<uint32_t>());
-    }
-    mesh.appendIndices(&indices[0], indices.size());
-    
-    RenderObject ro;
-    ro.mesh = mesh;
-    ro.textureIndex = 0;
-    m_renderObjects.push_back(ro);
-}
-
-void FezViewer::loadAO(XmlTree ao, Vec3f aoPos, Quatf aoRot, Vec3f aoScale, uint32_t texIndex)
-{
-    TriMesh mesh;
-    vector<Vec3f> positions;
-    vector<Vec3f> normals;
-    vector<Vec2f> texcoords;
-    vector<uint32_t> indices;
-    XmlTree xmlVertices = ao.getChild("ArtObject/ShaderInstancedIndexedPrimitives/Vertices");
-    
-    for (auto vertex : xmlVertices)
-    {
-        XmlTree posXml = vertex.getChild("Position/Vector3");
-        Vec3f pos = Vec3f(posXml["x"].getValue<float>(),
-                          posXml["y"].getValue<float>(),
-                          posXml["z"].getValue<float>());
-        pos = pos * aoRot;
-        pos *= aoScale;
-        pos += aoPos - (m_dimensions/2);
-        pos -= Vec3f(0.5, 0.5, 0.5);    // TODO: why is this offset needed?
-        positions.push_back(pos);
-        
-        XmlTree normXml = vertex.getChild("Normal");
-        normals.push_back(gc_normals[normXml.getValue<int>()]);
-        
-        XmlTree coordXml = vertex.getChild("TextureCoord/Vector2");
-        texcoords.push_back(Vec2f(coordXml["x"].getValue<float>(),
-                                  coordXml["y"].getValue<float>()));
-    }
-    
-    mesh.appendVertices(&positions[0], positions.size());
-    mesh.appendNormals(&normals[0], normals.size());
-    mesh.appendTexCoords(&texcoords[0], texcoords.size());
-    
-    XmlTree xmlIndices = ao.getChild("ArtObject/ShaderInstancedIndexedPrimitives/Indices");
-    for (auto index : xmlIndices)
-    {
-        indices.push_back(index.getValue<uint32_t>());
-    }
-    mesh.appendIndices(&indices[0], indices.size());
-    
-    RenderObject ro;
-    ro.mesh = mesh;
-    ro.textureIndex = texIndex;
-    m_renderObjects.push_back(ro);
 }
 
 void FezViewer::resize()
@@ -703,6 +688,7 @@ void FezViewer::keyDown(KeyEvent event)
     if (event.getChar() == 'f')
     {
         setFullScreen(!isFullScreen());
+        gl::enableAlphaBlending();
     }
     if (event.getChar() == KeyEvent::KEY_ESCAPE)
     {
@@ -712,7 +698,7 @@ void FezViewer::keyDown(KeyEvent event)
             m_thread->join();
             m_thread = nullptr;
         }
-        setDisplayString("FezViewer by Michael Romero - www.halogenica.net");
+        setDisplayString("FezViewer by Michael Romero - www.halogenica.net - @halogenica");
         m_quit = true;
     }
 }
@@ -734,6 +720,16 @@ void FezViewer::draw()
 {
     {
         lock_guard<mutex> lock( m_mutex );
+
+        if (m_trileTexReload)
+        {
+            m_trileTexture = gl::Texture(m_trileSurface);
+            m_trileTexture.setMinFilter(GL_NEAREST);
+            m_trileTexture.setMagFilter(GL_NEAREST);
+            Trile::s_pTexture = &m_trileTexture;
+            m_trileTexReload = false;
+        }
+        
         if (m_textReload)
         {
             m_textTexture = gl::Texture(m_pText->render());
@@ -742,14 +738,6 @@ void FezViewer::draw()
             timeline().apply(&m_textAlpha, 1.f, 5.f);
             timeline().apply(&m_textAlpha, 0.f, 1.f, EaseOutExpo()).appendTo(&m_textAlpha);
         }
-        for (auto& surf : m_surfaces)
-        {
-            gl::Texture trileTexture = gl::Texture(surf);
-            trileTexture.setMinFilter(GL_NEAREST);
-            trileTexture.setMagFilter(GL_NEAREST);
-            m_textures.push_back(trileTexture);
-        }
-        m_surfaces.clear();
     }
     
     gl::clear(Color(0.2f, 0.2f, 0.3f));
@@ -761,8 +749,8 @@ void FezViewer::draw()
 
     gl::setMatrices(m_camera.getCamera());
 
-    glCullFace(GL_NONE);
     gl::color(ColorA(1.0f, 1.0f, 1.0f, 1.0f));
+    glFrontFace(GL_CW);
     gl::translate(Vec3f::zero());
     gl::rotate(Vec3f::zero());
     gl::scale(Vec3f::one());
@@ -773,15 +761,23 @@ void FezViewer::draw()
     glEnable(GL_TEXTURE_2D);
     {
         lock_guard<mutex> lock( m_mutex );
-        for (const auto& ro : m_renderObjects)
+
+        // Draw Triles
+        for (Trile& trile : m_triles)
         {
-            if (m_textures.size() > ro.textureIndex)
-            {
-                m_textures[ro.textureIndex].enableAndBind();
-                gl::draw(ro.mesh);
-                m_textures[ro.textureIndex].disable();
-                m_textures[ro.textureIndex].unbind();
-            }
+            trile.Draw();
+        }
+
+        // Draw Art Objects
+        for (ArtObject& ao : m_artObjects)
+        {
+            ao.Draw();
+        }
+        
+        // Draw Background Plane
+        for (BackgroundPlane& bp : m_backgroundPlanes)
+        {
+            bp.Draw(m_camera.getCamera());
         }
         
         gl::popModelView();
@@ -790,12 +786,11 @@ void FezViewer::draw()
         gl::setMatricesWindow(getWindowSize());
         gl::disableDepthRead();
         gl::disableDepthWrite();
-        gl::enableAlphaBlending();
         gl::color(ColorA(1.f, 1.f, 1.f, m_textAlpha));
+        glFrontFace(GL_CCW);
         
         gl::draw(m_textTexture, Vec2f(0, getWindowHeight() - m_textTexture.getHeight()));
         
-        gl::disableAlphaBlending();
         gl::enableDepthRead();
         gl::enableDepthWrite();
         gl::popMatrices();

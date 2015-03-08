@@ -39,6 +39,10 @@
 		1F77F3F21A5F949B00F6CC99 /* uni05_53.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = uni05_53.ttf; path = ../resources/uni05_53.ttf; sourceTree = "<group>"; };
 		1F77F3F41A5F94A900F6CC99 /* Resources.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Resources.h; path = ../resources/Resources.h; sourceTree = "<group>"; };
 		1F77F3F51A66624F00F6CC99 /* icon.iconset */ = {isa = PBXFileReference; lastKnownFileType = folder.iconset; path = icon.iconset; sourceTree = "<group>"; };
+		1F77F3F91A6E43D900F6CC99 /* Common.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Common.h; path = ../src/Common.h; sourceTree = "<group>"; };
+		1F77F3FA1A6E43D900F6CC99 /* Trile.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Trile.h; path = ../src/Trile.h; sourceTree = "<group>"; };
+		1FB4865C1A6F59E400BDA5AD /* ArtObject.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = ArtObject.h; path = ../src/ArtObject.h; sourceTree = "<group>"; };
+		1FB4865D1A6F63F500BDA5AD /* BackgroundPlane.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = BackgroundPlane.h; path = ../src/BackgroundPlane.h; sourceTree = "<group>"; };
 		29B97324FDCFA39411CA2CEA /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = /System/Library/Frameworks/AppKit.framework; sourceTree = "<absolute>"; };
 		29B97325FDCFA39411CA2CEA /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = /System/Library/Frameworks/Foundation.framework; sourceTree = "<absolute>"; };
 		32CA4F630368D1EE00C91783 /* FezViewer_Prefix.pch */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FezViewer_Prefix.pch; sourceTree = "<group>"; };
@@ -75,6 +79,10 @@
 		080E96DDFE201D6D7F000001 /* Source */ = {
 			isa = PBXGroup;
 			children = (
+				1FB4865D1A6F63F500BDA5AD /* BackgroundPlane.h */,
+				1FB4865C1A6F59E400BDA5AD /* ArtObject.h */,
+				1F77F3F91A6E43D900F6CC99 /* Common.h */,
+				1F77F3FA1A6E43D900F6CC99 /* Trile.h */,
 				00BAE6590E7ED9C10018A608 /* FezViewer.cpp */,
 			);
 			name = Source;
